@@ -1,0 +1,12 @@
+# @package task
+defaults:
+  - /task/G1/G1_ground_alternating_goal_student
+  - _self_
+
+name: G1GroundRandomReachBaseline
+num_envs: 256
+objects: []
+command:
+  dataset:
+    mem_paths: [ground_random_reach_baseline/train]
+    path_weights: [1.0]

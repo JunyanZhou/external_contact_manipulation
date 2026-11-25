@@ -1,0 +1,19 @@
+# @package task
+defaults:
+  - /task/G1/G1_table_push_task
+  - _self_
+
+name: G1TablePushNoSupport
+# Keep the identical robot, target channel, and reference clips. The table
+# collider is out of reach, so this actor must solve the reach without it.
+objects:
+  - type: wall
+    name: table_top
+    pos: [10.0, 0.0, 0.865]
+    size: [0.6, 0.8, 0.03]
+    friction: 0.7
+reward:
+  tracking:
+    wall_hand_tracking: {weight: 0.0}
+    table_hand_support: {weight: 0.0}
+    joint_pos_tracking: {weight: 0.5}

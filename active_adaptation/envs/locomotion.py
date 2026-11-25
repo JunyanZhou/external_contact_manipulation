@@ -1,0 +1,258 @@
+import os
+import json
+import torch
+from isaaclab.utils import configclass
+
+import active_adaptation
+import active_adaptation.envs.mdp as mdp
+from active_adaptation.envs.base import _Env
+
+class SimpleEnv(_Env):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.robot = self.scene.articulations["robot"]
+        
+        if self.backend == "isaac":
+            self.lookat_env_i = (
+                self.scene._default_env_origins.cpu() 
+                - torch.tensor(self.cfg.viewer.lookat)
+            ).norm(dim=-1).argmin()
+
+    def setup_scene(self):
+        import active_adaptation.envs.scene as scene
+
+        if active_adaptation.get_backend() == "isaac":
+            import isaaclab.sim as sim_utils
+            from isaaclab.scene import InteractiveSceneCfg
+            from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+            from isaaclab.sensors import ContactSensorCfg
+            from active_adaptation.assets import ROBOTS
+            from active_adaptation.envs.terrain import TERRAINS
+            
+            scene_cfg = InteractiveSceneCfg(num_envs=self.cfg.num_envs, env_spacing=2.5, replicate_physics=True)
+            
+            scene_cfg.light_0 = AssetBaseCfg(
+                prim_path="/World/light_0",
+                spawn=sim_utils.DistantLightCfg(
+                    color=(0.4, 0.7, 0.9),
+                    intensity=3000.0,
+                    angle=10,
+                    exposure=0.2,
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(
+                    rot=(0.9330127, 0.25, 0.25, -0.0669873)
+                ),
+            )
+            scene_cfg.light_1 = AssetBaseCfg(
+                prim_path="/World/light_1",
+                spawn=sim_utils.DistantLightCfg(
+                    color=(0.8, 0.5, 0.5),
+                    intensity=3000.0,
+                    angle=20,
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(
+                    rot=(0.78201786, 0.3512424, 0.50162613, -0.11596581)
+                ),
+            )
+            scene_cfg.robot = ROBOTS[self.cfg.robot.name]
+            scene_cfg.robot.prim_path = "{ENV_REGEX_NS}/Robot"
+            scene_cfg.terrain = TERRAINS[self.cfg.terrain]
+            scene_cfg.contact_forces = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/.*ankle_roll_link", 
+                history_length=3,
+                track_air_time=True,
+                # filter_prim_paths_expr=["/World/ground"]
+            )
+            scene_cfg.ee_contact_forces = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/.*hand_mimic",
+                history_length=3,
+            )
+
+            if getattr(self.cfg, "proactive_contact", False):
+                scene_cfg.ee_contact_forces.history_length = 0
+                scene_cfg.ee_contact_forces.update_period = 0.0
+                wall_names = [
+                    str(obj.get("name")) for obj in (self.cfg.objects or [])
+                    if obj.get("type") == "wall" and obj.get("name")
+                ]
+                if len(wall_names) != 1:
+                    raise ValueError(
+                        "Proactive contact reward requires exactly one wall object; "
+                        f"found {wall_names}"
+                    )
+                scene_cfg.ee_wall_contact_forces = ContactSensorCfg(
+                    prim_path="{ENV_REGEX_NS}/Robot/left_hand_mimic",
+                    filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/{wall_names[0]}"],
+                    history_length=0,
+                    update_period=0.0,
+                )
+
+            # The foot-reach evaluator filters hand forces to the task wall.
+            # For the right support foot it uses the existing unfiltered
+            # ankle sensor, since GPU filtering against the global ground
+            # plane is unsupported in some Isaac Sim / PhysX versions.
+            if getattr(self.cfg, "eval_contact_forces", False):
+                objects = self.cfg.objects or []
+                door_task = "Door" in str(self.cfg.name)
+                wall_names = [
+                    str(obj.get("name")) for obj in objects
+                    if obj.get("type") == "wall" and obj.get("name")
+                ]
+                if door_task:
+                    wall_names = [name for name in wall_names if name == "right_return_wall"]
+                if len(wall_names) > 1:
+                    raise ValueError(
+                        "Contact-force evaluation supports at most one wall object; "
+                        f"found {wall_names}"
+                    )
+                if wall_names:
+                    scene_cfg.eval_left_hand_wall_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/left_hand_mimic",
+                        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/{wall_names[0]}"],
+                        history_length=0,
+                    )
+                    scene_cfg.eval_right_hand_wall_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_hand_mimic",
+                        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/{wall_names[0]}"],
+                        history_length=0,
+                    )
+                if "Drawer" in str(self.cfg.name):
+                    scene_cfg.eval_left_hand_cabinet_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/left_hand_mimic",
+                        history_length=0,
+                    )
+                    scene_cfg.eval_right_hand_drawer_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_hand_mimic",
+                        history_length=0,
+                    )
+                if door_task:
+                    scene_cfg.eval_torso_wall_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/torso_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/right_return_wall",
+                                                "{ENV_REGEX_NS}/right_return_wall_reveal"],
+                        history_length=0,
+                    )
+                    for back_body in ("waist_yaw_link", "waist_roll_link", "pelvis"):
+                        setattr(scene_cfg, f"eval_{back_body}_wall_force", ContactSensorCfg(
+                            prim_path=f"{{ENV_REGEX_NS}}/Robot/{back_body}",
+                            filter_prim_paths_expr=["{ENV_REGEX_NS}/right_return_wall",
+                                                    "{ENV_REGEX_NS}/right_return_wall_reveal"],
+                            history_length=0,
+                        ))
+                    scene_cfg.eval_right_foot_door_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/spring_door/Panel"],
+                        history_length=0,
+                    )
+                    scene_cfg.eval_right_knee_door_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_knee_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/spring_door/Panel"],
+                        history_length=0,
+                    )
+                crate_names = [
+                    str(obj.get("name")) for obj in objects
+                    if obj.get("type") == "box_extraction_crate" and obj.get("name")
+                ]
+                if crate_names:
+                    scene_cfg.eval_left_foot_crate_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/left_ankle_roll_link",
+                        filter_prim_paths_expr=[f"{{ENV_REGEX_NS}}/{crate_names[0]}"],
+                        history_length=0,
+                    )
+                right_foot_push = "RightFootPush" in str(self.cfg.name)
+                if "SpringPedal" in str(self.cfg.name):
+                    scene_cfg.eval_right_foot_pedal_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/spring_pedal/Plate"],
+                        history_length=0,
+                    )
+                if right_foot_push:
+                    scene_cfg.eval_right_foot_box_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_roll_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/push_block"],
+                        history_length=0,
+                    )
+                    scene_cfg.eval_right_ankle_pitch_box_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_ankle_pitch_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/push_block"],
+                        history_length=0,
+                    )
+                    scene_cfg.eval_right_knee_box_force = ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/right_knee_link",
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/push_block"],
+                        history_length=0,
+                    )
+                if "HeavyBoxPush" in str(self.cfg.name):
+                    for side in ("left", "right"):
+                        setattr(scene_cfg, f"eval_{side}_hand_box_force", ContactSensorCfg(
+                            prim_path=f"{{ENV_REGEX_NS}}/Robot/{side}_hand_mimic",
+                            filter_prim_paths_expr=["{ENV_REGEX_NS}/push_block"],
+                            history_length=0,
+                        ))
+
+            ### add task related objects
+            flags = self.cfg.flags or []
+            
+            # Add objects from config (manipulation tasks)
+            if hasattr(self.cfg, "objects") and self.cfg.objects:
+                from active_adaptation.envs.objects import add_objects_to_scene
+                add_objects_to_scene(scene_cfg, list(self.cfg.objects))
+
+            sim_cfg = sim_utils.SimulationCfg(
+                dt=self.cfg.sim.isaac_physics_dt,
+                render=sim_utils.RenderCfg(
+                    rendering_mode="quality",
+                ),
+                device=f"cuda:{active_adaptation.get_local_rank()}"
+            )
+            
+            # slightly reduces GPU memory usage
+            sim_cfg.physx.gpu_max_rigid_contact_count = 2**21
+            sim_cfg.physx.gpu_max_rigid_patch_count = 2**21
+            sim_cfg.physx.gpu_found_lost_pairs_capacity = 2538320 # 2**20
+            sim_cfg.physx.gpu_found_lost_aggregate_pairs_capacity = 61999079 # 2**26
+            sim_cfg.physx.gpu_total_aggregate_pairs_capacity = 2**23
+            sim_cfg.physx.gpu_collision_stack_size = 2**25
+            sim_cfg.physx.gpu_heap_capacity = 2**24
+
+            active_adaptation.print("create sim and scene")
+            self.sim, self.scene = scene.create_isaaclab_sim_and_scene(sim_cfg, scene_cfg)
+            active_adaptation.print("create sim and scene done")
+            # set camera view for "/OmniverseKit_Persp" camera
+            self.sim.set_camera_view(eye=self.cfg.viewer.eye, target=self.cfg.viewer.lookat)
+            try:
+                import omni.replicator.core as rep
+                # create render product
+                self._render_product = rep.create.render_product(
+                    "/OmniverseKit_Persp", tuple(self.cfg.viewer.resolution)
+                )
+                # create rgb annotator -- used to read data from the render product
+                self._rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb", device="cpu")
+                self._rgb_annotator.attach([self._render_product])
+            except ModuleNotFoundError as e:
+                print("Set enable_cameras=true to use cameras.")
+            
+            try:
+                from active_adaptation.utils.debug import DebugDraw
+                self.debug_draw = DebugDraw()
+                print("[INFO] Debug Draw API enabled.")
+            except ModuleNotFoundError:
+                print()
+        else:
+            raise NotImplementedError(
+                f"Unsupported backend: {active_adaptation.get_backend()}"
+            )
+
+        
+    def _reset_idx(self, env_ids: torch.Tensor):
+        self.command_manager.sample_init(env_ids)
+        self.stats[env_ids] = 0.
+        self.scene.reset(env_ids)
+
+    def render(self, mode: str = "human"):
+        robot_pos = self.robot.data.root_pos_w[self.lookat_env_i].cpu()
+        if mode == "rgb_array":
+            eye = torch.tensor(self.cfg.viewer.eye) + robot_pos
+            lookat = torch.tensor(self.cfg.viewer.lookat) + robot_pos
+            self.sim.set_camera_view(eye, lookat)
+        return super().render(mode)

@@ -1,0 +1,35 @@
+# @package algo
+_target_: active_adaptation.learning.ppo.ppo.PPOPolicy
+name: ppo
+train_every: 32
+ppo_epochs: 3
+num_minibatches: 8
+lr: 5.0e-06
+desired_kl: 0.01
+adaptive_lr: false
+clip_param: 0.2
+entropy_coef_start: 0.002
+entropy_coef_end: 0.0005
+init_noise_scale: 1.0
+load_noise_scale: null
+geometry_points: 0
+latent_dim: 256
+joint_pred_weight: 1.0
+arm_reference_loss_weight: 0.0
+leg_reference_loss_weight: 0.0
+symmetry_augmentation: false
+train_estimators: true
+direct_policy: false
+student_use_gt_joint_target: false
+reg_lambda: 0.2
+layer_norm: before
+value_norm: false
+phase: finetune
+vecnorm: eval
+in_keys:
+- policy
+- priv
+- joint_target
+- priv_critic
+command_modes: null
+checkpoint_path: null

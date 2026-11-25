@@ -1,0 +1,31 @@
+# @package task
+defaults:
+  - /task/G1/G1_table_push_goal_student
+  - _self_
+
+name: G1GroundAlternatingGoalStudent
+num_envs: 512
+max_episode_length: 850
+eval_contact_forces: false
+objects: []
+command:
+  _target_: active_adaptation.envs.mdp.commands.ground_alternating.GroundAlternatingCommand
+  dataset_step_limit: 800
+  dataset:
+    mem_paths: [ground_alternating_v3_balanced/train]
+    path_weights: [1.0]
+reward:
+  tracking:
+    swing_foot_tracking: {weight: 7.0}
+    alternating_lift: {weight: 10.0}
+    support_foot_tracking: {weight: 0.0, enabled: false}
+    wall_hand_tracking: {weight: 3.0}
+    table_hand_support: {weight: 0.0, enabled: false}
+    root_pos_tracking: {weight: 2.0}
+    root_rot_tracking: {weight: 1.0}
+    joint_pos_tracking: {weight: 0.7}
+  loco:
+    survival: {weight: 1.0}
+    joint_vel_l2: {weight: 0.0005, joint_names: ".*"}
+    action_rate_l2: {weight: 0.1}
+    joint_pos_limits: {weight: 1.0, joint_names: ".*", soft_factor: 0.9}

@@ -1,0 +1,31 @@
+# @package task
+defaults:
+  - /task/G1/G1
+  - _self_
+
+name: G1TablePushStatic
+num_envs: 1
+max_episode_length: 100000
+observe_on_reset: false
+eval_contact_forces: true
+robot:
+  name: g1_col_full
+flags: []
+objects:
+  - type: wall
+    name: table_top
+    pos: [0.55, 0.0, 0.85]
+    size: [0.6, 0.8, 0.03]
+    friction: 0.7
+command:
+  _target_: active_adaptation.envs.mdp.commands.table_push_static.TablePushStaticCommand
+  pose_path: artifacts/table_push/static_poses.npz
+  pose_index: 0
+action:
+  _target_: active_adaptation.envs.mdp.ceer_residual.CEERResidualAction
+  ceer_checkpoint: .cache/ceer/checkpoint_final.pt
+  ceer_force_limit: 30.0
+observation: {}
+reward: {}
+randomization: {}
+termination: {}
